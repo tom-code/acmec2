@@ -32,6 +32,7 @@ type AcmeSession struct {
 func NewAcmeSession(url string) *AcmeSession {
     s := AcmeSession {}
     s.discover(url)
+    s.verbose = true
     return &s
 }
 

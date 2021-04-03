@@ -85,14 +85,28 @@ type AuthChallenge struct {
     Status string
 }
 
-func parseAuthz(resp *http.Response) *AuthChallenge {
+type AuthObject struct {
+    Status string
+    Challenges []AuthChallenge
+}
+
+func (ao *AuthObject) getChallenge(typ string) (*AuthChallenge, error) {
+    for _, c := range ao.Challenges {
+        if c.Type == typ {
+            return &c, nil
+        }
+    }
+    return nil, fmt.Errorf("challenge of type %s not found", typ)
+}
+
+func parseAuth(resp *http.Response) (*AuthObject, error) {
     if resp.StatusCode != 200 {
         fmt.Println(resp.Status)
         msg, _ := ioutil.ReadAll(resp.Body)
         resp.Body.Close()
         fmt.Println(string(msg))
+        return nil, fmt.Errorf("unexpected status %s", resp.Status)
     }
-    fmt.Println(resp.Status)
     defer resp.Body.Close()
     var js struct {
         Status string `json:"status"`
@@ -105,22 +119,24 @@ func parseAuthz(resp *http.Response) *AuthChallenge {
     decoder := json.NewDecoder(resp.Body)
     err := decoder.Decode(&js)
     if err != nil {
-        panic(err)
+        return nil, err
     }
     fmt.Println(js)
-    for _, ch := range(js.Challenges) {
-        if ch.Type == "http-01" {
-            return &AuthChallenge{
-                Type: ch.Type,
-                Url: ch.Url,
-                Token: ch.Token,
-                Status: js.Status,
-            }
-        }
+    au := AuthObject {
+        Status: js.Status,
     }
-    return nil
-}
 
+    for _, ch := range(js.Challenges) {
+        c := AuthChallenge {
+            Type: ch.Type,
+            Url: ch.Url,
+            Token: ch.Token,
+        }
+        au.Challenges = append(au.Challenges, c)
+
+    }
+    return &au, nil
+}
 
 func thumbprint(key *ecdsa.PrivateKey) string {
     jsonWebKey := jose.JSONWebKey{
@@ -134,16 +150,16 @@ func thumbprint(key *ecdsa.PrivateKey) string {
     return base64.RawURLEncoding.EncodeToString(th[:])
 }
 
-func createCSR(key *ecdsa.PrivateKey, host string) []byte {
+func createCSR(key *ecdsa.PrivateKey, host string) ([]byte, error) {
     req := &x509.CertificateRequest {
         Subject: pkix.Name{CommonName: host},
         DNSNames: []string{host},
     }
     csr, err := x509.CreateCertificateRequest(rand.Reader, req, key)
     if err != nil {
-        panic(err)
+        return []byte{}, err
     }
-    return csr
+    return csr, nil
 }
 
 func handleGlobalFlags(cmd *cobra.Command) {
@@ -158,13 +174,15 @@ func accCreate(cmd *cobra.Command, args []string) {
     handleGlobalFlags(cmd)
     authorityUrl, err := cmd.Flags().GetString("authority-url")
     if err != nil {
-        panic(err)
+        fmt.Printf("can't get authority-url argument %s\n", err)
+        return
     }
 
     fmt.Println("generating private key...")
     ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
     if err != nil {
-        panic(err)
+        fmt.Printf("failed to generate private key: %s\n", err)
+        return
     }
 
     session := NewAcmeSession(authorityUrl)
@@ -182,6 +200,61 @@ func accCreate(cmd *cobra.Command, args []string) {
     account := res.Header.Get("Location")
     session.setAccount(account)
     session.save("account.json")
+}
+
+
+func accInfo(cmd *cobra.Command, args []string) {
+    handleGlobalFlags(cmd)
+    authorityUrl, err := cmd.Flags().GetString("authority-url")
+    if err != nil {
+        fmt.Println("autority-url is required")
+        return
+    }
+
+    session := NewAcmeSession(authorityUrl)
+    err = session.load("account.json")
+    if err != nil {
+        fmt.Printf("can't get account information: %s\n", err)
+        return
+    }
+    res := session.postJWS(session.account, "")
+    d, _ := ioutil.ReadAll(res.Body)
+    res.Body.Close()
+    fmt.Println(string(d))
+}
+
+func ordersInfo(cmd *cobra.Command, args []string) {
+    handleGlobalFlags(cmd)
+    authorityUrl, err := cmd.Flags().GetString("authority-url")
+    if err != nil {
+        fmt.Println("autority-url is required")
+        return
+    }
+
+    session := NewAcmeSession(authorityUrl)
+    err = session.load("account.json")
+    if err != nil {
+        fmt.Printf("can't get account information: %s\n", err)
+        return
+    }
+    res := session.postJWS(session.account, "")
+
+    var js struct {
+        Status string `json:"status"`
+        Orders string `json:"orders"`
+    }
+    decoder := json.NewDecoder(res.Body)
+    err = decoder.Decode(&js)
+    res.Body.Close()
+    if err != nil {
+        fmt.Printf("can't get account info response %s", err)
+        return
+    }
+
+    res = session.postJWS(js.Orders, "")
+    d, _ := ioutil.ReadAll(res.Body)
+    res.Body.Close()
+    fmt.Println(string(d))
 }
 
 func startHttpProofServer(token string, thumb string, port string) *http.Server {
@@ -239,17 +312,19 @@ func order(cmd *cobra.Command, args []string) {
     handleGlobalFlags(cmd)
     authorityUrl, err := cmd.Flags().GetString("authority-url")
     if err != nil {
-        panic(err)
+        fmt.Printf("authority-url is required")
+        return
     }
     proofPort, err := cmd.Flags().GetString("proof-port")
     if err != nil {
-        panic(err)
+        fmt.Printf("proof-port is required")
+        return
     }
 
     session := NewAcmeSession(authorityUrl)
     err = session.load("account.json")
     if err != nil {
-        panic(err)
+        fmt.Printf("can't get account info %s\n", err)
     }
 
     hostname := args[0]
@@ -257,9 +332,21 @@ func order(cmd *cobra.Command, args []string) {
 
 
     ecKeyCSR, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+    if err != nil {
+        fmt.Printf("can't generate private key %s\n", err)
+        return
+    }
     writeKey("key-"+hostname+".pem", ecKeyCSR)
+    if err != nil {
+        fmt.Printf("can't write private key %s\n", err)
+        return
+    }
 
-    csr := createCSR(ecKeyCSR, hostname)
+    csr, err := createCSR(ecKeyCSR, hostname)
+    if err != nil {
+        fmt.Printf("can't generate certificate request %s\n", err)
+        return
+    }
 
     // start certificate order
     fmt.Println("issuing new order")
@@ -274,7 +361,8 @@ func order(cmd *cobra.Command, args []string) {
 
     order, err := parseOrderResponse(res)
     if err != nil {
-        panic(err)
+        fmt.Printf("can't parse order response %s\n", err)
+        return
     }
     res.Body.Close()
     fmt.Printf("order resp: %s\n", res.Status)
@@ -283,8 +371,19 @@ func order(cmd *cobra.Command, args []string) {
     // start authorization
     fmt.Printf("issuing authorization %s\n", order.Authorizations[0])
     res = session.postJWS(order.Authorizations[0], "")
-    challenge := parseAuthz(res)
+    auth, err := parseAuth(res)
     res.Body.Close()
+    if err != nil {
+        fmt.Printf("can't parse auth response %s\n", err)
+        return
+    }
+
+    // only http-01 supported for now
+    challenge, err := auth.getChallenge("http-01")
+    if err != nil {
+        fmt.Printf("can't get http-01 challenge %s\n", err)
+        return
+    }
 
     fmt.Println("starting http server")
  
@@ -301,12 +400,16 @@ func order(cmd *cobra.Command, args []string) {
     // wait until autorized / status=valid
     for {
         res = session.postJWS(order.Authorizations[0], "")
-        aresp := parseAuthz(res)
+        aresp, err := parseAuth(res)
         res.Body.Close()
-        status := aresp.Status
-        fmt.Printf("auth url:%s status: %s\n", order.Authorizations[0], status)
-        if (res.StatusCode == 200) && (status == "valid") {
-            break
+        if err == nil {
+            status := aresp.Status
+            fmt.Printf("auth url:%s status: %s\n", order.Authorizations[0], status)
+            if (res.StatusCode == 200) && (status == "valid") {
+                break
+            }
+        } else {
+            fmt.Println(err)
         }
         time.Sleep(1000 * time.Millisecond)
     }
@@ -365,11 +468,22 @@ func main() {
         Run: accCreate,
         Short: "create account",
     }
+    accountInfo:= &cobra.Command {
+        Use: "acc-info",
+        Run: accInfo,
+        Short: "show account object",
+    }
 
     orderCommand := &cobra.Command {
         Use: "order [hostname]",
         Args: cobra.MinimumNArgs(1),
         Run: order,
+        Short: "make signing order",
+    }
+
+    orderInfoCommand := &cobra.Command {
+        Use: "order-info",
+        Run: ordersInfo,
         Short: "make signing order",
     }
 
@@ -381,7 +495,9 @@ func main() {
     }
 
     rootCmd.AddCommand(accountCreate)
+    rootCmd.AddCommand(accountInfo)
     rootCmd.AddCommand(orderCommand)
     rootCmd.AddCommand(dumpCommand)
+    rootCmd.AddCommand(orderInfoCommand)
     rootCmd.Execute()
 }
