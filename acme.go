@@ -64,8 +64,14 @@ func parseOrderResponse(resp *http.Response) (*Order, error) {
         Finalize string `json:"finalize"`
         Certificate string`json:"certificate"`
     }
-    decoder := json.NewDecoder(resp.Body)
-    err := decoder.Decode(&js)
+    respdata, err := ioutil.ReadAll(resp.Body)
+    if err != nil {
+        return nil, err
+    }
+    fmt.Println(string(respdata))
+    //decoder := json.NewDecoder(resp.Body)
+    //err := decoder.Decode(&js)
+    err = json.Unmarshal(respdata, &js)
     if err != nil {
         return nil, err
     }
@@ -116,8 +122,12 @@ func parseAuth(resp *http.Response) (*AuthObject, error) {
             Token string `json:"token"`
         } `json:"challenges"`
     }
-    decoder := json.NewDecoder(resp.Body)
-    err := decoder.Decode(&js)
+    respdata, err := ioutil.ReadAll(resp.Body)
+    if err != nil {
+        return nil, err
+    }
+    fmt.Println(string(respdata))
+    err = json.Unmarshal(respdata, &js)
     if err != nil {
         return nil, err
     }
@@ -238,6 +248,13 @@ func ordersInfo(cmd *cobra.Command, args []string) {
         return
     }
     res := session.postJWS(session.account, "")
+    if res.StatusCode != 200 {
+        fmt.Printf("can't get account info %s\n", res.Status)
+        d, _ := ioutil.ReadAll(res.Body)
+        res.Body.Close()
+        fmt.Println(string(d))
+        return
+    }
 
     var js struct {
         Status string `json:"status"`
@@ -247,14 +264,29 @@ func ordersInfo(cmd *cobra.Command, args []string) {
     err = decoder.Decode(&js)
     res.Body.Close()
     if err != nil {
-        fmt.Printf("can't get account info response %s", err)
+        fmt.Printf("can't parse account info response %s", err)
         return
     }
 
+    if len(js.Orders) == 0 {
+        fmt.Println("orders url not provided!")
+        return
+    }
     res = session.postJWS(js.Orders, "")
-    d, _ := ioutil.ReadAll(res.Body)
+
+    var js2 struct {
+        Orders []string `json:"orders"`
+    }
+    decoder = json.NewDecoder(res.Body)
+    err = decoder.Decode(&js2)
     res.Body.Close()
-    fmt.Println(string(d))
+    for _, ourl := range(js2.Orders) {
+        fmt.Printf("order %s\n", ourl)
+        res = session.postJWS(ourl, "")
+        d, _ := ioutil.ReadAll(res.Body)
+        res.Body.Close()
+        fmt.Println(string(d))
+    }
 }
 
 func startHttpProofServer(token string, thumb string, port string) *http.Server {
@@ -308,6 +340,36 @@ func startHttpProofServer(token string, thumb string, port string) *http.Server 
     return httpServer
 }
 
+func downloadIssuedCertificate(session *AcmeSession, orderURL string, hostname string) {
+    fmt.Println("try to get cert")
+    path := ""
+    for {
+        res := session.postJWS(orderURL, "")
+        //path = parseOrderFinal(res)
+        resporder, err := parseOrderResponse(res)
+        res.Body.Close()
+        if err != nil {
+            fmt.Printf("problem getting cert %s\n", err.Error())
+        } else if resporder.Status != "valid" {
+            fmt.Printf("order status: %s\n", resporder.Status)
+        } else {
+            path = resporder.Certificate
+            fmt.Printf("order response cerificate url:%s\n", path)
+            if len(path) > 3 {
+                break
+            }
+        }
+        time.Sleep(1000 * time.Millisecond)
+    }
+
+    res := session.postJWS(path, "")
+    fmt.Printf("cert download status %s\n", res.Status)
+    chainOut, _ := os.Create(fmt.Sprintf("chain-%s.pem", hostname))
+    defer chainOut.Close()
+    io.Copy(chainOut, res.Body)
+    res.Body.Close()
+}
+
 func order(cmd *cobra.Command, args []string) {
     handleGlobalFlags(cmd)
     authorityUrl, err := cmd.Flags().GetString("authority-url")
@@ -336,6 +398,7 @@ func order(cmd *cobra.Command, args []string) {
         fmt.Printf("can't generate private key %s\n", err)
         return
     }
+
     writeKey("key-"+hostname+".pem", ecKeyCSR)
     if err != nil {
         fmt.Printf("can't write private key %s\n", err)
@@ -422,33 +485,8 @@ func order(cmd *cobra.Command, args []string) {
     res = session.postJWS(order.FinalizeUrl, csrReq)
     res.Body.Close()
 
-    fmt.Println("try to get cert")
-    path := ""
-    for {
-        res = session.postJWS(order.OrderUrl, "")
-        //path = parseOrderFinal(res)
-        resporder, err := parseOrderResponse(res)
-        res.Body.Close()
-        if err != nil {
-            fmt.Printf("problem getting cert %s\n", err.Error())
-        } else if resporder.Status != "valid" {
-            fmt.Printf("order status: %s\n", resporder.Status)
-        } else {
-            path = resporder.Certificate
-            fmt.Printf("order response cerificate url:%s\n", path)
-            if len(path) > 3 {
-                break
-            }
-        }
-        time.Sleep(1000 * time.Millisecond)
-    }
+    downloadIssuedCertificate(session, order.OrderUrl, hostname)
 
-    res = session.postJWS(path, "")
-    fmt.Printf("cert download status %s\n", res.Status)
-    chainOut, _ := os.Create(fmt.Sprintf("chain-%s.pem", hostname))
-    defer chainOut.Close()
-    io.Copy(chainOut, res.Body)
-    res.Body.Close()
 }
 
 
@@ -493,11 +531,18 @@ func main() {
         Run: dumpPEM,
         Short: "dump content of pem file",
     }
+    pemkey2hexdataCommand := &cobra.Command {
+        Use: "pem2hex [file]",
+        Args: cobra.MinimumNArgs(1),
+        Run: pemkey2hexdata,
+        Short: "dump key from pem file",
+    }
 
     rootCmd.AddCommand(accountCreate)
     rootCmd.AddCommand(accountInfo)
     rootCmd.AddCommand(orderCommand)
     rootCmd.AddCommand(dumpCommand)
     rootCmd.AddCommand(orderInfoCommand)
+    rootCmd.AddCommand(pemkey2hexdataCommand)
     rootCmd.Execute()
 }

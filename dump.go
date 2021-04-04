@@ -1,12 +1,13 @@
 package main
 
 import (
-    "crypto/x509"
-    "encoding/pem"
-    "fmt"
-    "io/ioutil"
+	"crypto/x509"
+	"encoding/hex"
+	"encoding/pem"
+	"fmt"
+	"io/ioutil"
 
-    "github.com/spf13/cobra"
+	"github.com/spf13/cobra"
 )
 
 
@@ -53,4 +54,16 @@ func dumpPEMFile(fname string) error {
 
 func dumpPEM(cmd *cobra.Command, args []string) {
     dumpPEMFile(args[0])
+}
+
+
+func pemkey2hexdata(cmd *cobra.Command, args []string){
+    data, err := ioutil.ReadFile(args[0])
+    if err != nil {
+        fmt.Println(err)
+        return
+    }
+    block, _ := pem.Decode(data)
+    str := hex.EncodeToString(block.Bytes)
+    fmt.Println(str)
 }

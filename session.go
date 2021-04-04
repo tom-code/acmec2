@@ -31,9 +31,13 @@ type AcmeSession struct {
 
 func NewAcmeSession(url string) *AcmeSession {
     s := AcmeSession {}
-    s.discover(url)
     s.verbose = true
+    s.discover(url)
     return &s
+}
+
+func (s *AcmeSession) setVerbose(verbose bool) {
+    s.verbose = verbose
 }
 
 func (s *AcmeSession) setKey(key *ecdsa.PrivateKey) {
@@ -172,12 +176,17 @@ func (s *AcmeSession) postJWSNoRetry(url string, payload string) *http.Response 
         fmt.Printf("sign err: %s\n", err.Error())
     }
     output := jws.FullSerialize()
+    if s.verbose {
+        log.Printf("POST %s\n", url)
+    }
     res, err := http.Post(url, "application/jose+json", strings.NewReader(output))
     if err == nil {
         s.nonce = res.Header.Get("replay-nonce")
         if s.verbose {
             fmt.Printf("got nonce: %s [%s]\n", res.Header.Get("replay-nonce"), url)
         }
+    } else {
+        log.Println(err)
     }
     return res
 }
