@@ -89,7 +89,11 @@ func accCreate(cmd *cobra.Command, args []string) {
         return
     }
 
-    session := NewAcmeSession(authorityUrl)
+    session, err := NewAcmeSession(authorityUrl)
+    if err != nil {
+        fmt.Printf("can't establish session %s\n", err)
+        return
+    }
     session.setKey(ecKey)
 
     // create new account
@@ -115,7 +119,11 @@ func accInfo(cmd *cobra.Command, args []string) {
         return
     }
 
-    session := NewAcmeSession(authorityUrl)
+    session, err := NewAcmeSession(authorityUrl)
+    if err != nil {
+        fmt.Printf("can't establish session %s\n", err)
+        return
+    }
     err = session.load("account.json")
     if err != nil {
         fmt.Printf("can't get account information: %s\n", err)
@@ -135,7 +143,11 @@ func ordersInfo(cmd *cobra.Command, args []string) {
         return
     }
 
-    session := NewAcmeSession(authorityUrl)
+    session, err := NewAcmeSession(authorityUrl)
+    if err != nil {
+        fmt.Printf("can't establish session %s\n", err)
+        return
+    }
     err = session.load("account.json")
     if err != nil {
         fmt.Printf("can't get account information: %s\n", err)
@@ -231,6 +243,7 @@ func startHttpProofServer(token string, thumb string, port string) *http.Server 
         }
         time.Sleep(100*time.Millisecond)
     }
+    fmt.Println("http ready")
     return httpServer
 }
 
@@ -264,7 +277,8 @@ func downloadIssuedCertificate(session *AcmeSession, orderURL string, hostname s
     res.Body.Close()
 }
 
-func authorize(session *AcmeSession, authurl string, proofPort string) error {
+
+func authorize(typ string, session *AcmeSession, authurl string, proofPort string, host string) error {
     // start authorization
     fmt.Printf("issuing authorization %s\n", authurl)
     res := session.postJWS(authurl, "")
@@ -274,15 +288,23 @@ func authorize(session *AcmeSession, authurl string, proofPort string) error {
         return fmt.Errorf("can't parse auth response %s\n", err)
     }
 
-    // only http-01 supported for now
-    challenge, err := auth.getChallenge("http-01")
+    challenge, err := auth.getChallenge(typ)
     if err != nil {
-        return fmt.Errorf("can't get http-01 challenge %s\n", err)
+        return fmt.Errorf("can't get %s challenge %s\n", typ, err)
     }
 
-    fmt.Println("starting http server")
+    fmt.Println("starting proof server")
 
-    httpServer := startHttpProofServer(challenge.Token, thumbprint(session.key), proofPort)
+    var authSrv io.Closer
+    if typ == "dns-01" {
+        v1 := challenge.Token + "." + thumbprint(session.key)
+        sha := crypto.SHA256.New()
+        sha.Write([]byte(v1))
+        token := base64.RawURLEncoding.EncodeToString(sha.Sum(nil))
+        authSrv = dnsStart(host, token, proofPort)
+    } else {
+        authSrv = startHttpProofServer(challenge.Token, thumbprint(session.key), proofPort)
+    }
 
     fmt.Printf("confirm server is ready %s\n", challenge.Url)
     // confirm we arranged resource
@@ -309,7 +331,7 @@ func authorize(session *AcmeSession, authurl string, proofPort string) error {
         time.Sleep(1000 * time.Millisecond)
     }
 
-    httpServer.Close()
+    authSrv.Close()
     return nil
 }
 
@@ -320,13 +342,22 @@ func order(cmd *cobra.Command, args []string) {
         fmt.Printf("authority-url is required")
         return
     }
+    challengeType, err := cmd.Flags().GetString("challenge-type")
+    if err != nil {
+        fmt.Printf("authority-url is required")
+        return
+    }
     proofPort, err := cmd.Flags().GetString("proof-port")
     if err != nil {
         fmt.Printf("proof-port is required")
         return
     }
 
-    session := NewAcmeSession(authorityUrl)
+    session, err := NewAcmeSession(authorityUrl)
+    if err != nil {
+        fmt.Printf("can't establish session %s\n", err)
+        return
+    }
     err = session.load("account.json")
     if err != nil {
         fmt.Printf("can't get account info %s\n", err)
@@ -374,7 +405,7 @@ func order(cmd *cobra.Command, args []string) {
 
     // perform all athorizations ?
     for _, authURL := range order.Authorizations {
-        err = authorize(session, authURL, proofPort)
+        err = authorize(challengeType, session, authURL, proofPort, hostname)
         if err != nil {
             fmt.Printf("authorize error %s\n", err)
             return
@@ -427,6 +458,7 @@ func main() {
         Run: order,
         Short: "make signing order",
     }
+    orderCommand.Flags().StringP("challenge-type", "t", "http-01", "challenge - http-01/dns-01")
 
     orderInfoCommand := &cobra.Command {
         Use: "order-info",

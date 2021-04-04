@@ -24,11 +24,14 @@ type AcmeSession struct {
     verbose bool
 }
 
-func NewAcmeSession(url string) *AcmeSession {
+func NewAcmeSession(url string) (*AcmeSession, error){
     s := AcmeSession {}
     s.verbose = true
-    s.discover(url)
-    return &s
+    err := s.discover(url)
+    if err != nil {
+        return nil, err
+    }
+    return &s, nil
 }
 
 func (s *AcmeSession) setVerbose(verbose bool) {
