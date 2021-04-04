@@ -7,7 +7,6 @@ import (
     "encoding/json"
     "fmt"
     "io/ioutil"
-    "log"
     "net/http"
     "strings"
 
@@ -114,10 +113,10 @@ func (s *AcmeSession) discover(url string) error {
         return err
     }
     if s.verbose {
-        log.Println("acme directory:")
-        log.Printf("  newAccount: %s\n", js.NewAccount)
-        log.Printf("  newNonce:   %s\n", js.NewNonce)
-        log.Printf("  newOrder:   %s\n", js.NewOrder)
+        fmt.Println("acme directory:")
+        fmt.Printf("  newAccount: %s\n", js.NewAccount)
+        fmt.Printf("  newNonce:   %s\n", js.NewNonce)
+        fmt.Printf("  newOrder:   %s\n", js.NewOrder)
     }
     s.directory = Directory {
         NewAccount: js.NewAccount,
@@ -133,7 +132,7 @@ func (s *AcmeSession) getNonce() string {
     }
     resp, err := http.Get(s.directory.NewNonce)
     if err != nil {
-        log.Println(err)
+        fmt.Println(err)
         return ""
     }
     resp.Body.Close()
@@ -177,7 +176,7 @@ func (s *AcmeSession) postJWSNoRetry(url string, payload string) *http.Response 
     }
     output := jws.FullSerialize()
     if s.verbose {
-        log.Printf("POST %s\n", url)
+        fmt.Printf("POST %s\n", url)
     }
     res, err := http.Post(url, "application/jose+json", strings.NewReader(output))
     if err == nil {
@@ -186,7 +185,7 @@ func (s *AcmeSession) postJWSNoRetry(url string, payload string) *http.Response 
             fmt.Printf("got nonce: %s [%s]\n", res.Header.Get("replay-nonce"), url)
         }
     } else {
-        log.Println(err)
+        fmt.Println(err)
     }
     return res
 }

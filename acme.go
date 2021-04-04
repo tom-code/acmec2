@@ -69,8 +69,6 @@ func parseOrderResponse(resp *http.Response) (*Order, error) {
         return nil, err
     }
     fmt.Println(string(respdata))
-    //decoder := json.NewDecoder(resp.Body)
-    //err := decoder.Decode(&js)
     err = json.Unmarshal(respdata, &js)
     if err != nil {
         return nil, err
@@ -131,7 +129,6 @@ func parseAuth(resp *http.Response) (*AuthObject, error) {
     if err != nil {
         return nil, err
     }
-    fmt.Println(js)
     au := AuthObject {
         Status: js.Status,
     }
@@ -370,6 +367,55 @@ func downloadIssuedCertificate(session *AcmeSession, orderURL string, hostname s
     res.Body.Close()
 }
 
+func authorize(session *AcmeSession, authurl string, proofPort string) error {
+    // start authorization
+    fmt.Printf("issuing authorization %s\n", authurl)
+    res := session.postJWS(authurl, "")
+    auth, err := parseAuth(res)
+    res.Body.Close()
+    if err != nil {
+        return fmt.Errorf("can't parse auth response %s\n", err)
+    }
+
+    // only http-01 supported for now
+    challenge, err := auth.getChallenge("http-01")
+    if err != nil {
+        return fmt.Errorf("can't get http-01 challenge %s\n", err)
+    }
+
+    fmt.Println("starting http server")
+
+    httpServer := startHttpProofServer(challenge.Token, thumbprint(session.key), proofPort)
+
+    fmt.Printf("confirm server is ready %s\n", challenge.Url)
+    // confirm we arranged resource
+    res = session.postJWS(challenge.Url, "{}")
+    res.Body.Close()
+
+    // give them time to perform authorization
+    time.Sleep(100*time.Millisecond)
+
+    // wait until autorized / status=valid
+    for {
+        res = session.postJWS(authurl, "")
+        aresp, err := parseAuth(res)
+        res.Body.Close()
+        if err == nil {
+            status := aresp.Status
+            fmt.Printf("auth url:%s status:%s\n", authurl, status)
+            if (res.StatusCode == 200) && (status == "valid") {
+                break
+            }
+        } else {
+            fmt.Println(err)
+        }
+        time.Sleep(1000 * time.Millisecond)
+    }
+
+    httpServer.Close()
+    return nil
+}
+
 func order(cmd *cobra.Command, args []string) {
     handleGlobalFlags(cmd)
     authorityUrl, err := cmd.Flags().GetString("authority-url")
@@ -421,72 +467,38 @@ func order(cmd *cobra.Command, args []string) {
         fmt.Println(string(resp))
         return
     }
-
+    fmt.Printf("order resp: %s\n", res.Status)
     order, err := parseOrderResponse(res)
+    res.Body.Close()
     if err != nil {
         fmt.Printf("can't parse order response %s\n", err)
         return
     }
-    res.Body.Close()
-    fmt.Printf("order resp: %s\n", res.Status)
-    fmt.Println(order)
 
-    // start authorization
-    fmt.Printf("issuing authorization %s\n", order.Authorizations[0])
-    res = session.postJWS(order.Authorizations[0], "")
-    auth, err := parseAuth(res)
-    res.Body.Close()
-    if err != nil {
-        fmt.Printf("can't parse auth response %s\n", err)
-        return
-    }
-
-    // only http-01 supported for now
-    challenge, err := auth.getChallenge("http-01")
-    if err != nil {
-        fmt.Printf("can't get http-01 challenge %s\n", err)
-        return
-    }
-
-    fmt.Println("starting http server")
- 
-    httpServer := startHttpProofServer(challenge.Token, thumbprint(session.key), proofPort)
-
-    fmt.Printf("confirm server is ready %s\n", challenge.Url)
-    // confirm we arranged resource
-    res = session.postJWS(challenge.Url, "{}")
-    res.Body.Close()
-
-    // give them time to perform authorization
-    time.Sleep(100*time.Millisecond)
-
-    // wait until autorized / status=valid
-    for {
-        res = session.postJWS(order.Authorizations[0], "")
-        aresp, err := parseAuth(res)
-        res.Body.Close()
-        if err == nil {
-            status := aresp.Status
-            fmt.Printf("auth url:%s status: %s\n", order.Authorizations[0], status)
-            if (res.StatusCode == 200) && (status == "valid") {
-                break
-            }
-        } else {
-            fmt.Println(err)
+    // perform all athorizations ?
+    for _, authURL := range order.Authorizations {
+        err = authorize(session, authURL, proofPort)
+        if err != nil {
+            fmt.Printf("authorize error %s\n", err)
+            return
         }
-        time.Sleep(1000 * time.Millisecond)
     }
 
-    httpServer.Close()
 
-    fmt.Println("send csr")
+    fmt.Println("send finalize")
     csrReq := `{"csr":"`+ base64.RawURLEncoding.EncodeToString(csr[:])+`"}`
-    fmt.Printf("csr requst: %s\n", csrReq)   
+    fmt.Printf("finalize requst: %s\n", csrReq)   
     res = session.postJWS(order.FinalizeUrl, csrReq)
+    if res.StatusCode != 200 {
+        fmt.Printf("finalize failed %s\n", res.Status)
+        d, err := ioutil.ReadAll(res.Body)
+        if err == nil {
+            fmt.Println(string(d))
+        }
+    }
     res.Body.Close()
 
     downloadIssuedCertificate(session, order.OrderUrl, hostname)
-
 }
 
 
