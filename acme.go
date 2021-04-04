@@ -42,109 +42,6 @@ func writeKey(path string, k *ecdsa.PrivateKey) error {
 }
 
 
-type Order struct {
-    Status string
-    Authorizations []string
-    FinalizeUrl string
-    OrderUrl string
-    Certificate string
-}
-
-
-func parseOrderResponse(resp *http.Response) (*Order, error) {
-    defer resp.Body.Close()
-    orderLocation := resp.Header.Get("Location")
-    var js struct {
-        Status string`json:"status"`
-        Identifiers []struct {
-            Type string `json:"type"`
-            Value string `json:"value"`
-        } `json:"Identifiers"`
-        Authorizations []string `json:"authorizations"`
-        Finalize string `json:"finalize"`
-        Certificate string`json:"certificate"`
-    }
-    respdata, err := ioutil.ReadAll(resp.Body)
-    if err != nil {
-        return nil, err
-    }
-    fmt.Println(string(respdata))
-    err = json.Unmarshal(respdata, &js)
-    if err != nil {
-        return nil, err
-    }
-    return &Order {
-        Authorizations: js.Authorizations,
-        FinalizeUrl: js.Finalize,
-        OrderUrl: orderLocation,
-        Status: js.Status,
-        Certificate: js.Certificate,
-    }, nil
-}
-
-type AuthChallenge struct {
-    Type string
-    Url string
-    Token string
-    Status string
-}
-
-type AuthObject struct {
-    Status string
-    Challenges []AuthChallenge
-}
-
-func (ao *AuthObject) getChallenge(typ string) (*AuthChallenge, error) {
-    for _, c := range ao.Challenges {
-        if c.Type == typ {
-            return &c, nil
-        }
-    }
-    return nil, fmt.Errorf("challenge of type %s not found", typ)
-}
-
-func parseAuth(resp *http.Response) (*AuthObject, error) {
-    if resp.StatusCode != 200 {
-        fmt.Println(resp.Status)
-        msg, _ := ioutil.ReadAll(resp.Body)
-        resp.Body.Close()
-        fmt.Println(string(msg))
-        return nil, fmt.Errorf("unexpected status %s", resp.Status)
-    }
-    defer resp.Body.Close()
-    var js struct {
-        Status string `json:"status"`
-        Challenges []struct {
-            Type  string `json:"type"`
-            Url   string `json:"url"`
-            Token string `json:"token"`
-        } `json:"challenges"`
-    }
-    respdata, err := ioutil.ReadAll(resp.Body)
-    if err != nil {
-        return nil, err
-    }
-    fmt.Println(string(respdata))
-    err = json.Unmarshal(respdata, &js)
-    if err != nil {
-        return nil, err
-    }
-    au := AuthObject {
-        Status: js.Status,
-    }
-
-    for _, ch := range(js.Challenges) {
-        c := AuthChallenge {
-            Type: ch.Type,
-            Url: ch.Url,
-            Token: ch.Token,
-        }
-        au.Challenges = append(au.Challenges, c)
-
-    }
-    return &au, nil
-}
-
 func thumbprint(key *ecdsa.PrivateKey) string {
     jsonWebKey := jose.JSONWebKey{
         Key:       key,
@@ -159,8 +56,8 @@ func thumbprint(key *ecdsa.PrivateKey) string {
 
 func createCSR(key *ecdsa.PrivateKey, host string) ([]byte, error) {
     req := &x509.CertificateRequest {
-        Subject: pkix.Name{CommonName: host},
-        DNSNames: []string{host},
+        Subject: pkix.Name { CommonName: host },
+        DNSNames: []string { host },
     }
     csr, err := x509.CreateCertificateRequest(rand.Reader, req, key)
     if err != nil {

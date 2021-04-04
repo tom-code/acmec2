@@ -14,11 +14,7 @@ import (
 )
 
 
-type Directory struct {
-    NewAccount string
-    NewNonce string
-    NewOrder string
-}
+
 
 type AcmeSession struct {
     nonce string
@@ -98,30 +94,16 @@ func (s *AcmeSession) discover(url string) error {
         return fmt.Errorf("unexpected http status %s", resp.Status)
     }
 
-    var js struct {
-        NewAccount string `json:"newAccount"`
-        NewNonce   string `json:"newNonce"`
-        NewOrder   string `json:"newOrder"`
-        RevokeCert string `json:"revokeCert"`
-        Meta   struct {
-            Terms   string   `json:"termsOfService"`
-        }
-    }
-    decoder := json.NewDecoder(resp.Body)
-    err = decoder.Decode(&js)
+    d, err := parseDirectory(resp)
     if err != nil {
         return err
     }
+    s.directory = *d
     if s.verbose {
         fmt.Println("acme directory:")
-        fmt.Printf("  newAccount: %s\n", js.NewAccount)
-        fmt.Printf("  newNonce:   %s\n", js.NewNonce)
-        fmt.Printf("  newOrder:   %s\n", js.NewOrder)
-    }
-    s.directory = Directory {
-        NewAccount: js.NewAccount,
-        NewNonce: js.NewNonce,
-        NewOrder: js.NewOrder,
+        fmt.Printf("  newAccount: %s\n", s.directory.NewAccount)
+        fmt.Printf("  newNonce:   %s\n", s.directory.NewNonce)
+        fmt.Printf("  newOrder:   %s\n", s.directory.NewOrder)
     }
     return nil
 }

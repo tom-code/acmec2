@@ -1,13 +1,13 @@
 package main
 
 import (
-	"crypto/x509"
-	"encoding/hex"
-	"encoding/pem"
-	"fmt"
-	"io/ioutil"
+    "crypto/x509"
+    "encoding/hex"
+    "encoding/pem"
+    "fmt"
+    "io/ioutil"
 
-	"github.com/spf13/cobra"
+    "github.com/spf13/cobra"
 )
 
 
