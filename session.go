@@ -2,6 +2,7 @@ package main
 
 import (
     "crypto/ecdsa"
+    "crypto/tls"
     "crypto/x509"
     "encoding/hex"
     "encoding/json"
@@ -9,6 +10,7 @@ import (
     "io/ioutil"
     "net/http"
     "strings"
+    "time"
 
     "gopkg.in/square/go-jose.v2"
 )
@@ -22,11 +24,20 @@ type AcmeSession struct {
     account string
     key *ecdsa.PrivateKey
     verbose bool
+    client *http.Client
 }
 
-func NewAcmeSession(url string) (*AcmeSession, error){
+func NewAcmeSession(url string, insecure bool) (*AcmeSession, error){
     s := AcmeSession {}
-    s.verbose = true
+    transport := &http.Transport {
+        TLSClientConfig: &tls.Config{
+            InsecureSkipVerify: insecure,
+        },
+        IdleConnTimeout: 10 * time.Second,
+    }
+    s.client = &http.Client{
+        Transport: transport,
+    }
     err := s.discover(url)
     if err != nil {
         return nil, err
@@ -88,7 +99,7 @@ func (s *AcmeSession) load(fname string) error {
 }
 
 func (s *AcmeSession) discover(url string) error {
-    resp, err := http.Get(url)
+    resp, err := s.client.Get(url)
     if err != nil {
         return err
     }
@@ -115,7 +126,7 @@ func (s *AcmeSession) getNonce() string {
     if len(s.nonce) > 0 {
         return s.nonce
     }
-    resp, err := http.Get(s.directory.NewNonce)
+    resp, err := s.client.Get(s.directory.NewNonce)
     if err != nil {
         fmt.Println(err)
         return ""
@@ -128,7 +139,7 @@ func (s *AcmeSession) getNonce() string {
 type NS struct {
     nonce string
 }
-func (ns NS)Nonce()(string, error) {
+func (ns NS) Nonce() (string, error) {
     return ns.nonce, nil
 }
 
@@ -163,7 +174,7 @@ func (s *AcmeSession) postJWSNoRetry(url string, payload string) *http.Response 
     if s.verbose {
         fmt.Printf("POST %s\n", url)
     }
-    res, err := http.Post(url, "application/jose+json", strings.NewReader(output))
+    res, err := s.client.Post(url, "application/jose+json", strings.NewReader(output))
     if err == nil {
         s.nonce = res.Header.Get("replay-nonce")
         if s.verbose {

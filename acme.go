@@ -5,7 +5,6 @@ import (
     "crypto/ecdsa"
     "crypto/elliptic"
     "crypto/rand"
-    "crypto/tls"
     "crypto/x509"
     "crypto/x509/pkix"
     "encoding/base64"
@@ -66,21 +65,23 @@ func createCSR(key *ecdsa.PrivateKey, host string) ([]byte, error) {
     return csr, nil
 }
 
-func handleGlobalFlags(cmd *cobra.Command) {
-    insecure, _ := cmd.Flags().GetBool("insecure")
-    if insecure {
-        http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-    }
+type Config struct {
+    url string
+    insecure bool
+    verbose bool
+}
+func getConfigFromCobra(cmd *cobra.Command) Config {
+    var config Config
+    config.url, _ = cmd.Flags().GetString("authority-url")
+    config.insecure, _ = cmd.Flags().GetBool("insecure")
+    config.verbose, _ = cmd.Flags().GetBool("verbose")
+    return config
 }
 
 
 func accCreate(cmd *cobra.Command, args []string) {
-    handleGlobalFlags(cmd)
-    authorityUrl, err := cmd.Flags().GetString("authority-url")
-    if err != nil {
-        fmt.Printf("can't get authority-url argument %s\n", err)
-        return
-    }
+
+    config := getConfigFromCobra(cmd)
 
     fmt.Println("generating private key...")
     ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -89,11 +90,12 @@ func accCreate(cmd *cobra.Command, args []string) {
         return
     }
 
-    session, err := NewAcmeSession(authorityUrl)
+    session, err := NewAcmeSession(config.url, config.insecure)
     if err != nil {
         fmt.Printf("can't establish session %s\n", err)
         return
     }
+    session.setVerbose(config.verbose)
     session.setKey(ecKey)
 
     // create new account
@@ -112,14 +114,10 @@ func accCreate(cmd *cobra.Command, args []string) {
 
 
 func accInfo(cmd *cobra.Command, args []string) {
-    handleGlobalFlags(cmd)
-    authorityUrl, err := cmd.Flags().GetString("authority-url")
-    if err != nil {
-        fmt.Println("autority-url is required")
-        return
-    }
 
-    session, err := NewAcmeSession(authorityUrl)
+    config := getConfigFromCobra(cmd)
+
+    session, err := NewAcmeSession(config.url, config.insecure)
     if err != nil {
         fmt.Printf("can't establish session %s\n", err)
         return
@@ -136,18 +134,15 @@ func accInfo(cmd *cobra.Command, args []string) {
 }
 
 func ordersInfo(cmd *cobra.Command, args []string) {
-    handleGlobalFlags(cmd)
-    authorityUrl, err := cmd.Flags().GetString("authority-url")
-    if err != nil {
-        fmt.Println("autority-url is required")
-        return
-    }
 
-    session, err := NewAcmeSession(authorityUrl)
+    config := getConfigFromCobra(cmd)
+
+    session, err := NewAcmeSession(config.url, config.insecure)
     if err != nil {
         fmt.Printf("can't establish session %s\n", err)
         return
     }
+    session.verbose = config.verbose
     err = session.load("account.json")
     if err != nil {
         fmt.Printf("can't get account information: %s\n", err)
@@ -195,7 +190,7 @@ func ordersInfo(cmd *cobra.Command, args []string) {
     }
 }
 
-func startHttpProofServer(token string, thumb string, port string) *http.Server {
+func startHttpProofServer(token string, keyAuth string, port string) *http.Server {
     httpHandler := func (w http.ResponseWriter, r *http.Request) {
         if len(r.URL.Path) < 3 {
             w.WriteHeader(200)
@@ -214,9 +209,8 @@ func startHttpProofServer(token string, thumb string, port string) *http.Server 
             return
         }
         w.Header().Add("Content-Type", "application/octet-stream")
-        out := spl[3] + "." + thumb
-        w.Write([]byte(out))
-        fmt.Printf("http sending response %s\n", out)
+        w.Write([]byte(keyAuth))
+        fmt.Printf("http sending response %s\n", keyAuth)
     }
 
     httpServer := &http.Server{
@@ -252,7 +246,6 @@ func downloadIssuedCertificate(session *AcmeSession, orderURL string, hostname s
     path := ""
     for {
         res := session.postJWS(orderURL, "")
-        //path = parseOrderFinal(res)
         resporder, err := parseOrderResponse(res)
         res.Body.Close()
         if err != nil {
@@ -295,15 +288,18 @@ func authorize(typ string, session *AcmeSession, authurl string, proofPort strin
 
     fmt.Println("starting proof server")
 
+    keyAuth := challenge.Token + "." + thumbprint(session.key)
     var authSrv io.Closer
-    if typ == "dns-01" {
-        v1 := challenge.Token + "." + thumbprint(session.key)
+    switch typ {
+    case "dns-01":
         sha := crypto.SHA256.New()
-        sha.Write([]byte(v1))
+        sha.Write([]byte(keyAuth))
         token := base64.RawURLEncoding.EncodeToString(sha.Sum(nil))
         authSrv = dnsStart(host, token, proofPort)
-    } else {
-        authSrv = startHttpProofServer(challenge.Token, thumbprint(session.key), proofPort)
+    case "http-01":
+        authSrv = startHttpProofServer(challenge.Token, keyAuth, proofPort)
+    default:
+        return fmt.Errorf("unknown challenge type %s", typ)
     }
 
     fmt.Printf("confirm server is ready %s\n", challenge.Url)
@@ -336,12 +332,8 @@ func authorize(typ string, session *AcmeSession, authurl string, proofPort strin
 }
 
 func order(cmd *cobra.Command, args []string) {
-    handleGlobalFlags(cmd)
-    authorityUrl, err := cmd.Flags().GetString("authority-url")
-    if err != nil {
-        fmt.Printf("authority-url is required")
-        return
-    }
+    config := getConfigFromCobra(cmd)
+
     challengeType, err := cmd.Flags().GetString("challenge-type")
     if err != nil {
         fmt.Printf("authority-url is required")
@@ -353,11 +345,12 @@ func order(cmd *cobra.Command, args []string) {
         return
     }
 
-    session, err := NewAcmeSession(authorityUrl)
+    session, err := NewAcmeSession(config.url, config.insecure)
     if err != nil {
         fmt.Printf("can't establish session %s\n", err)
         return
     }
+    session.setVerbose(config.verbose)
     err = session.load("account.json")
     if err != nil {
         fmt.Printf("can't get account info %s\n", err)
@@ -440,6 +433,7 @@ func main() {
     rootCmd.PersistentFlags().StringP("authority-url", "u", "https://localhost:14000/dir", "authority url")
     rootCmd.PersistentFlags().StringP("proof-port", "p", "5002", "proof port")
     rootCmd.PersistentFlags().Bool("insecure", false, "insecure - do not verify server certificates")
+    rootCmd.PersistentFlags().BoolP("verbose", "v", false, "verbose")
 
     accountCreate := &cobra.Command {
         Use: "acc-create",
