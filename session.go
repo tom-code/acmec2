@@ -143,7 +143,7 @@ func (ns NS) Nonce() (string, error) {
     return ns.nonce, nil
 }
 
-func (s *AcmeSession) postJWSNoRetry(url string, payload string) *http.Response {
+func (s *AcmeSession) postJWSNoRetry(url string, payload string) (*http.Response, error) {
     options := &jose.SignerOptions{}
     options.WithHeader("url", url)
     if len(s.account) > 0 {
@@ -164,7 +164,7 @@ func (s *AcmeSession) postJWSNoRetry(url string, payload string) *http.Response 
     }
     signer, err := jose.NewSigner(signingKey, options)
     if err != nil {
-        panic(err)
+        return nil, err
     }
     jws, err := signer.Sign([]byte(payload))
     if err != nil {
@@ -181,19 +181,36 @@ func (s *AcmeSession) postJWSNoRetry(url string, payload string) *http.Response 
             fmt.Printf("got nonce: %s [%s]\n", res.Header.Get("replay-nonce"), url)
         }
     } else {
-        fmt.Println(err)
+        return nil, err
     }
-    return res
+    return res, nil
 }
 
-func (s *AcmeSession) postJWS(url string, payload string) *http.Response {
-    res := s.postJWSNoRetry(url, payload)
-    if res.StatusCode == 400 {
-        if s.verbose {
-            fmt.Println("JWS retry")
+func (s *AcmeSession) postJWS(url string, payload string) (*http.Response, []byte, error) {
+    var res *http.Response
+    var err error
+    var body []byte
+    for i:=0; i<3; i++ {
+        res, err = s.postJWSNoRetry(url, payload)
+        if err != nil {
+            if s.verbose {
+                fmt.Println(err)
+            }
+            continue
         }
-        return s.postJWSNoRetry(url, payload)
-    } else {
-        return res
+        body, _ = ioutil.ReadAll(res.Body)
+        res.Body.Close()
+        if res.StatusCode == 400 {
+            if s.verbose {
+                fmt.Println("JWS retry")
+            }
+            continue
+        } else {
+            return res, body, nil
+        }
     }
+    if (err == nil) && (res != nil) {
+        err = fmt.Errorf("%s\n%s", res.Status, string(body))
+    }
+    return res, []byte{}, fmt.Errorf("postJWS failed: %s", err)
 }

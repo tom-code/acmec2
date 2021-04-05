@@ -92,7 +92,7 @@ func accCreate(cmd *cobra.Command, args []string) {
 
     session, err := NewAcmeSession(config.url, config.insecure)
     if err != nil {
-        fmt.Printf("can't establish session %s\n", err)
+        fmt.Printf("can't establish session: %s\n", err)
         return
     }
     session.setVerbose(config.verbose)
@@ -102,12 +102,20 @@ func accCreate(cmd *cobra.Command, args []string) {
     fmt.Println("creating account")
     newAcc := `{"termsOfServiceAgreed":true,"contact":["mailto:adm1@admin.cz"]}`
 
-    res := session.postJWS(session.directory.NewAccount, newAcc)
-    if (res == nil) || (res.StatusCode != 201) {
-        fmt.Printf("account was not created %s\n", res.Status)
+    res, body, err := session.postJWS(session.directory.NewAccount, newAcc)
+    if err != nil {
+        fmt.Println(err)
+        return
+    }
+    if res.StatusCode != 201 {
+        fmt.Printf("account was not created: %s\n", res.Status)
         return
     }
     account := res.Header.Get("Location")
+    fmt.Printf("account was created [%s]\n", account)
+    if config.verbose {
+        fmt.Println(string(body))
+    }
     session.setAccount(account)
     session.save("account.json")
 }
@@ -119,7 +127,7 @@ func accInfo(cmd *cobra.Command, args []string) {
 
     session, err := NewAcmeSession(config.url, config.insecure)
     if err != nil {
-        fmt.Printf("can't establish session %s\n", err)
+        fmt.Printf("can't establish session: %s\n", err)
         return
     }
     err = session.load("account.json")
@@ -127,10 +135,15 @@ func accInfo(cmd *cobra.Command, args []string) {
         fmt.Printf("can't get account information: %s\n", err)
         return
     }
-    res := session.postJWS(session.account, "")
-    d, _ := ioutil.ReadAll(res.Body)
-    res.Body.Close()
-    fmt.Println(string(d))
+    res, body, err := session.postJWS(session.account, "")
+    if err != nil {
+        fmt.Println(err)
+        return
+    }
+    if res.StatusCode != 200 {
+        fmt.Printf("unexpected status: %s\n", res.Status)
+    }
+    fmt.Println(string(body))
 }
 
 func ordersInfo(cmd *cobra.Command, args []string) {
@@ -148,12 +161,14 @@ func ordersInfo(cmd *cobra.Command, args []string) {
         fmt.Printf("can't get account information: %s\n", err)
         return
     }
-    res := session.postJWS(session.account, "")
+    res, body, err := session.postJWS(session.account, "")
+    if err != nil {
+        fmt.Println(err)
+        return
+    }
     if res.StatusCode != 200 {
-        fmt.Printf("can't get account info %s\n", res.Status)
-        d, _ := ioutil.ReadAll(res.Body)
-        res.Body.Close()
-        fmt.Println(string(d))
+        fmt.Printf("can't get account info: %s\n", res.Status)
+        fmt.Println(string(body))
         return
     }
 
@@ -161,32 +176,39 @@ func ordersInfo(cmd *cobra.Command, args []string) {
         Status string `json:"status"`
         Orders string `json:"orders"`
     }
-    decoder := json.NewDecoder(res.Body)
-    err = decoder.Decode(&js)
-    res.Body.Close()
+    err = json.Unmarshal(body, &js)
     if err != nil {
-        fmt.Printf("can't parse account info response %s", err)
+        fmt.Printf("can't parse account info response: %s", err)
+        return
+    }
+    if len(js.Orders) == 0 {
+        fmt.Println("orders url not received!")
         return
     }
 
-    if len(js.Orders) == 0 {
-        fmt.Println("orders url not provided!")
+    res, body, err = session.postJWS(js.Orders, "")
+    if err != nil {
+        fmt.Println(err)
         return
     }
-    res = session.postJWS(js.Orders, "")
 
     var js2 struct {
         Orders []string `json:"orders"`
     }
-    decoder = json.NewDecoder(res.Body)
-    err = decoder.Decode(&js2)
-    res.Body.Close()
+    err = json.Unmarshal(body, &js2)
+    if err != nil {
+        fmt.Println(err)
+        return
+    }
+
     for _, ourl := range(js2.Orders) {
         fmt.Printf("order %s\n", ourl)
-        res = session.postJWS(ourl, "")
-        d, _ := ioutil.ReadAll(res.Body)
-        res.Body.Close()
-        fmt.Println(string(d))
+        res, body, err = session.postJWS(ourl, "")
+        if err != nil {
+            fmt.Println(err)
+            continue
+        }
+        fmt.Println(string(body))
     }
 }
 
@@ -241,15 +263,21 @@ func startHttpProofServer(token string, keyAuth string, port string) *http.Serve
     return httpServer
 }
 
-func downloadIssuedCertificate(session *AcmeSession, orderURL string, hostname string) {
+func downloadIssuedCertificate(session *AcmeSession, orderURL string, hostname string) error {
     fmt.Println("try to get cert")
     path := ""
-    for {
-        res := session.postJWS(orderURL, "")
-        resporder, err := parseOrderResponse(res)
-        res.Body.Close()
+    expireAt := time.Now().Add(time.Minute)
+    for time.Now().Before(expireAt) {
+        res, body, err := session.postJWS(orderURL, "")
         if err != nil {
-            fmt.Printf("problem getting cert %s\n", err.Error())
+            fmt.Println(err)
+            time.Sleep(100*time.Millisecond)
+            continue
+        }
+
+        resporder, err := parseOrderResponse(res, body)
+        if err != nil {
+            fmt.Printf("problem getting cert: %s\n", err.Error())
         } else if resporder.Status != "valid" {
             fmt.Printf("order status: %s\n", resporder.Status)
         } else {
@@ -259,31 +287,39 @@ func downloadIssuedCertificate(session *AcmeSession, orderURL string, hostname s
                 break
             }
         }
-        time.Sleep(1000 * time.Millisecond)
+        time.Sleep(1 * time.Second)
+    }
+    if len(path) < 3 {
+        return fmt.Errorf("certificate download failed")
     }
 
-    res := session.postJWS(path, "")
+    res, body, err := session.postJWS(path, "")
+    if err != nil {
+        return fmt.Errorf("cert download failed: %s\n", err)
+    }
     fmt.Printf("cert download status %s\n", res.Status)
-    chainOut, _ := os.Create(fmt.Sprintf("chain-%s.pem", hostname))
-    defer chainOut.Close()
-    io.Copy(chainOut, res.Body)
-    res.Body.Close()
+    if res.StatusCode == 200 {
+        ioutil.WriteFile(fmt.Sprintf("chain-%s.pem", hostname), body, 0600)
+    }
+    return nil
 }
 
 
 func authorize(typ string, session *AcmeSession, authurl string, proofPort string, host string) error {
     // start authorization
     fmt.Printf("issuing authorization %s\n", authurl)
-    res := session.postJWS(authurl, "")
-    auth, err := parseAuth(res)
-    res.Body.Close()
+    res, body, err := session.postJWS(authurl, "")
     if err != nil {
-        return fmt.Errorf("can't parse auth response %s\n", err)
+        return err
+    }
+    auth, err := parseAuth(res, body)
+    if err != nil {
+        return fmt.Errorf("can't parse auth response: %s\n", err)
     }
 
     challenge, err := auth.getChallenge(typ)
     if err != nil {
-        return fmt.Errorf("can't get %s challenge %s\n", typ, err)
+        return fmt.Errorf("can't get %s challenge: %s\n", typ, err)
     }
 
     fmt.Println("starting proof server")
@@ -304,21 +340,33 @@ func authorize(typ string, session *AcmeSession, authurl string, proofPort strin
 
     fmt.Printf("confirm server is ready %s\n", challenge.Url)
     // confirm we arranged resource
-    res = session.postJWS(challenge.Url, "{}")
-    res.Body.Close()
+    res, _, err = session.postJWS(challenge.Url, "{}")
+    if err != nil {
+        return err
+    }
+    if res.StatusCode != 200 {
+        return fmt.Errorf("challenge request failed %s %s", challenge.Url, err)
+    }
 
     // give them time to perform authorization
     time.Sleep(100*time.Millisecond)
 
     // wait until autorized / status=valid
-    for {
-        res = session.postJWS(authurl, "")
-        aresp, err := parseAuth(res)
-        res.Body.Close()
+    expireAt := time.Now().Add(10*time.Second)
+    ok := false
+    status := ""
+    for time.Now().Before(expireAt) {
+        res, body, err = session.postJWS(authurl, "")
+        if err != nil {
+            fmt.Println(err)
+            continue
+        }
+        aresp, err := parseAuth(res, body)
         if err == nil {
-            status := aresp.Status
+            status = aresp.Status
             fmt.Printf("auth url:%s status:%s\n", authurl, status)
             if (res.StatusCode == 200) && (status == "valid") {
+                ok = true
                 break
             }
         } else {
@@ -326,8 +374,10 @@ func authorize(typ string, session *AcmeSession, authurl string, proofPort strin
         }
         time.Sleep(1000 * time.Millisecond)
     }
-
     authSrv.Close()
+    if !ok {
+        return fmt.Errorf("authorize did not finish: status:%s err:%s", status, err)
+    }
     return nil
 }
 
@@ -347,13 +397,13 @@ func order(cmd *cobra.Command, args []string) {
 
     session, err := NewAcmeSession(config.url, config.insecure)
     if err != nil {
-        fmt.Printf("can't establish session %s\n", err)
+        fmt.Printf("can't establish session: %s\n", err)
         return
     }
     session.setVerbose(config.verbose)
     err = session.load("account.json")
     if err != nil {
-        fmt.Printf("can't get account info %s\n", err)
+        fmt.Printf("can't get account info: %s\n", err)
     }
 
     hostname := args[0]
@@ -362,26 +412,30 @@ func order(cmd *cobra.Command, args []string) {
 
     ecKeyCSR, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
     if err != nil {
-        fmt.Printf("can't generate private key %s\n", err)
+        fmt.Printf("can't generate private key: %s\n", err)
         return
     }
 
     writeKey("key-"+hostname+".pem", ecKeyCSR)
     if err != nil {
-        fmt.Printf("can't write private key %s\n", err)
+        fmt.Printf("can't write private key: %s\n", err)
         return
     }
 
     csr, err := createCSR(ecKeyCSR, hostname)
     if err != nil {
-        fmt.Printf("can't generate certificate request %s\n", err)
+        fmt.Printf("can't generate certificate request: %s\n", err)
         return
     }
 
     // start certificate order
     fmt.Println("issuing new order")
     newOrder := fmt.Sprintf(`{"identifiers": [ { "type": "dns", "value": "%s" } ]}`,hostname)
-    res := session.postJWS(session.directory.NewOrder, newOrder)
+    res, body, err := session.postJWS(session.directory.NewOrder, newOrder)
+    if err != nil {
+        fmt.Printf("order request failed: %s\n", err)
+        return
+    }
     if res.StatusCode != 201 {
         fmt.Println("order request failed")
         resp, _ := ioutil.ReadAll(res.Body)
@@ -389,10 +443,9 @@ func order(cmd *cobra.Command, args []string) {
         return
     }
     fmt.Printf("order resp: %s\n", res.Status)
-    order, err := parseOrderResponse(res)
-    res.Body.Close()
+    order, err := parseOrderResponse(res, body)
     if err != nil {
-        fmt.Printf("can't parse order response %s\n", err)
+        fmt.Printf("can't parse order response: %s\n", err)
         return
     }
 
@@ -400,7 +453,7 @@ func order(cmd *cobra.Command, args []string) {
     for _, authURL := range order.Authorizations {
         err = authorize(challengeType, session, authURL, proofPort, hostname)
         if err != nil {
-            fmt.Printf("authorize error %s\n", err)
+            fmt.Printf("authorize error: %s\n", err)
             return
         }
     }
@@ -409,17 +462,19 @@ func order(cmd *cobra.Command, args []string) {
     fmt.Println("send finalize")
     csrReq := `{"csr":"`+ base64.RawURLEncoding.EncodeToString(csr[:])+`"}`
     fmt.Printf("finalize requst: %s\n", csrReq)   
-    res = session.postJWS(order.FinalizeUrl, csrReq)
-    if res.StatusCode != 200 {
-        fmt.Printf("finalize failed %s\n", res.Status)
-        d, err := ioutil.ReadAll(res.Body)
-        if err == nil {
-            fmt.Println(string(d))
-        }
+    res, body, err = session.postJWS(order.FinalizeUrl, csrReq)
+    if err != nil {
+        fmt.Printf("finalize failed: %s\n", err)
     }
-    res.Body.Close()
+    if res.StatusCode != 200 {
+        fmt.Printf("finalize failed: %s\n", res.Status)
+        fmt.Println(body)
+    }
 
-    downloadIssuedCertificate(session, order.OrderUrl, hostname)
+    err = downloadIssuedCertificate(session, order.OrderUrl, hostname)
+    if err != nil {
+        fmt.Println(err)
+    }
 }
 
 

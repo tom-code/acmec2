@@ -34,7 +34,7 @@ type AuthObject struct {
 }
 
 
-func parseOrderResponse(resp *http.Response) (*Order, error) {
+func parseOrderResponse(resp *http.Response, body []byte) (*Order, error) {
     defer resp.Body.Close()
     orderLocation := resp.Header.Get("Location")
     var js struct {
@@ -47,12 +47,8 @@ func parseOrderResponse(resp *http.Response) (*Order, error) {
         Finalize string `json:"finalize"`
         Certificate string`json:"certificate"`
     }
-    respdata, err := ioutil.ReadAll(resp.Body)
-    if err != nil {
-        return nil, err
-    }
-    fmt.Println(string(respdata))
-    err = json.Unmarshal(respdata, &js)
+    fmt.Println(string(body))
+    err := json.Unmarshal(body, &js)
     if err != nil {
         return nil, err
     }
@@ -65,8 +61,6 @@ func parseOrderResponse(resp *http.Response) (*Order, error) {
     }, nil
 }
 
-
-
 func (ao *AuthObject) getChallenge(typ string) (*AuthChallenge, error) {
     for _, c := range ao.Challenges {
         if c.Type == typ {
@@ -76,7 +70,7 @@ func (ao *AuthObject) getChallenge(typ string) (*AuthChallenge, error) {
     return nil, fmt.Errorf("challenge of type %s not found", typ)
 }
 
-func parseAuth(resp *http.Response) (*AuthObject, error) {
+func parseAuth(resp *http.Response, body []byte) (*AuthObject, error) {
     if resp.StatusCode != 200 {
         fmt.Println(resp.Status)
         msg, _ := ioutil.ReadAll(resp.Body)
@@ -93,12 +87,8 @@ func parseAuth(resp *http.Response) (*AuthObject, error) {
             Token string `json:"token"`
         } `json:"challenges"`
     }
-    respdata, err := ioutil.ReadAll(resp.Body)
-    if err != nil {
-        return nil, err
-    }
-    fmt.Println(string(respdata))
-    err = json.Unmarshal(respdata, &js)
+    fmt.Println(string(body))
+    err := json.Unmarshal(body, &js)
     if err != nil {
         return nil, err
     }
