@@ -58,11 +58,7 @@ func createCSR(key *ecdsa.PrivateKey, host string) ([]byte, error) {
         Subject: pkix.Name { CommonName: host },
         DNSNames: []string { host },
     }
-    csr, err := x509.CreateCertificateRequest(rand.Reader, req, key)
-    if err != nil {
-        return []byte{}, err
-    }
-    return csr, nil
+    return x509.CreateCertificateRequest(rand.Reader, req, key)
 }
 
 type Config struct {
@@ -130,8 +126,7 @@ func accInfo(cmd *cobra.Command, args []string) {
         fmt.Printf("can't establish session: %s\n", err)
         return
     }
-    err = session.load("account.json")
-    if err != nil {
+    if err = session.load("account.json"); err != nil {
         fmt.Printf("can't get account information: %s\n", err)
         return
     }
@@ -156,8 +151,7 @@ func ordersInfo(cmd *cobra.Command, args []string) {
         return
     }
     session.verbose = config.verbose
-    err = session.load("account.json")
-    if err != nil {
+    if err = session.load("account.json"); err != nil {
         fmt.Printf("can't get account information: %s\n", err)
         return
     }
@@ -176,8 +170,7 @@ func ordersInfo(cmd *cobra.Command, args []string) {
         Status string `json:"status"`
         Orders string `json:"orders"`
     }
-    err = json.Unmarshal(body, &js)
-    if err != nil {
+    if err = json.Unmarshal(body, &js); err != nil {
         fmt.Printf("can't parse account info response: %s", err)
         return
     }
@@ -195,20 +188,19 @@ func ordersInfo(cmd *cobra.Command, args []string) {
     var js2 struct {
         Orders []string `json:"orders"`
     }
-    err = json.Unmarshal(body, &js2)
-    if err != nil {
+    if err = json.Unmarshal(body, &js2); err != nil {
         fmt.Println(err)
         return
     }
 
     for _, ourl := range(js2.Orders) {
         fmt.Printf("order %s\n", ourl)
-        res, body, err = session.postJWS(ourl, "")
-        if err != nil {
+        if _, body, err = session.postJWS(ourl, ""); err != nil {
             fmt.Println(err)
             continue
+        } else {
+            fmt.Println(string(body))
         }
-        fmt.Println(string(body))
     }
 }
 
@@ -265,12 +257,20 @@ func startHttpProofServer(token string, keyAuth string, port string) *http.Serve
 
 func downloadIssuedCertificate(session *AcmeSession, orderURL string, hostname string) error {
     fmt.Println("try to get cert")
+    var lasterr error
+    var status string
     path := ""
     expireAt := time.Now().Add(time.Minute)
     for time.Now().Before(expireAt) {
         res, body, err := session.postJWS(orderURL, "")
         if err != nil {
+            lasterr = err
             fmt.Println(err)
+            time.Sleep(100*time.Millisecond)
+            continue
+        }
+        if res.StatusCode != 200 {
+            lasterr = fmt.Errorf("unpexpected status %s", res.Status)
             time.Sleep(100*time.Millisecond)
             continue
         }
@@ -278,8 +278,10 @@ func downloadIssuedCertificate(session *AcmeSession, orderURL string, hostname s
         resporder, err := parseOrderResponse(res, body)
         if err != nil {
             fmt.Printf("problem getting cert: %s\n", err.Error())
+            lasterr = err
         } else if resporder.Status != "valid" {
             fmt.Printf("order status: %s\n", resporder.Status)
+            status = resporder.Status
         } else {
             path = resporder.Certificate
             fmt.Printf("order response cerificate url:%s\n", path)
@@ -290,7 +292,7 @@ func downloadIssuedCertificate(session *AcmeSession, orderURL string, hostname s
         time.Sleep(1 * time.Second)
     }
     if len(path) < 3 {
-        return fmt.Errorf("certificate download failed")
+        return fmt.Errorf("certificate download failed status:%s err:%s", status,lasterr)
     }
 
     res, body, err := session.postJWS(path, "")
@@ -315,6 +317,12 @@ func authorize(typ string, session *AcmeSession, authurl string, proofPort strin
     auth, err := parseAuth(res, body)
     if err != nil {
         return fmt.Errorf("can't parse auth response: %s\n", err)
+    }
+
+    // it seems pebble can carry authorization from previous order or something like that ??
+    if auth.Status == "valid" {
+        fmt.Println("already autorized")
+        return nil
     }
 
     challenge, err := auth.getChallenge(typ)
@@ -355,9 +363,11 @@ func authorize(typ string, session *AcmeSession, authurl string, proofPort strin
     expireAt := time.Now().Add(10*time.Second)
     ok := false
     status := ""
+    var lasterr error
     for time.Now().Before(expireAt) {
         res, body, err = session.postJWS(authurl, "")
         if err != nil {
+            lasterr = err
             fmt.Println(err)
             continue
         }
@@ -371,12 +381,13 @@ func authorize(typ string, session *AcmeSession, authurl string, proofPort strin
             }
         } else {
             fmt.Println(err)
+            lasterr = err
         }
         time.Sleep(1000 * time.Millisecond)
     }
     authSrv.Close()
     if !ok {
-        return fmt.Errorf("authorize did not finish: status:%s err:%s", status, err)
+        return fmt.Errorf("authorize did not finish: status:%s err:%s", status, lasterr)
     }
     return nil
 }
@@ -384,16 +395,9 @@ func authorize(typ string, session *AcmeSession, authurl string, proofPort strin
 func order(cmd *cobra.Command, args []string) {
     config := getConfigFromCobra(cmd)
 
-    challengeType, err := cmd.Flags().GetString("challenge-type")
-    if err != nil {
-        fmt.Printf("authority-url is required")
-        return
-    }
-    proofPort, err := cmd.Flags().GetString("proof-port")
-    if err != nil {
-        fmt.Printf("proof-port is required")
-        return
-    }
+    challengeType, _ := cmd.Flags().GetString("challenge-type")
+    proofPort, _ := cmd.Flags().GetString("proof-port")
+
 
     session, err := NewAcmeSession(config.url, config.insecure)
     if err != nil {
@@ -401,14 +405,12 @@ func order(cmd *cobra.Command, args []string) {
         return
     }
     session.setVerbose(config.verbose)
-    err = session.load("account.json")
-    if err != nil {
+    if err = session.load("account.json"); err != nil {
         fmt.Printf("can't get account info: %s\n", err)
     }
 
     hostname := args[0]
     fmt.Printf("order hostname %s\n", hostname)
-
 
     ecKeyCSR, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
     if err != nil {
@@ -416,8 +418,7 @@ func order(cmd *cobra.Command, args []string) {
         return
     }
 
-    writeKey("key-"+hostname+".pem", ecKeyCSR)
-    if err != nil {
+    if err = writeKey("key-"+hostname+".pem", ecKeyCSR); err != nil {
         fmt.Printf("can't write private key: %s\n", err)
         return
     }
@@ -471,8 +472,7 @@ func order(cmd *cobra.Command, args []string) {
         fmt.Println(body)
     }
 
-    err = downloadIssuedCertificate(session, order.OrderUrl, hostname)
-    if err != nil {
+    if err = downloadIssuedCertificate(session, order.OrderUrl, hostname); err != nil {
         fmt.Println(err)
     }
 }
