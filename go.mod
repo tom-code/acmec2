@@ -1,4 +1,4 @@
-module acmec
+module github.com/tom-code/acmec2
 
 go 1.15
 
