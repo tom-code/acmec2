@@ -23,6 +23,8 @@ import (
     "gopkg.in/square/go-jose.v2"
 )
 
+
+//test
 func writeKey(path string, k *ecdsa.PrivateKey) error {
     f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
     if err != nil {
